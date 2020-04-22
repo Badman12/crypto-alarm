@@ -199,7 +199,7 @@ func main() {
 			weather.changeWeather(resp)
 			whiteLoger.writeLog(weather)
 
-			time.Sleep(2 * time.Second)
+			time.Sleep(2 * time.Minute)
 		}
 	}()
 
