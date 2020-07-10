@@ -1,216 +1,173 @@
+/*
+ * Author: Anton Volokha
+ * Copyright (c) 2020
+ */
+
 package main
 
 import (
-	"bufio"
-	"encoding/json"
-	"fmt"
-	"io/ioutil"
-	"log"
-	"net/http"
-	"os"
-	"strings"
-	"time"
+  "encoding/json"
+  "fmt"
+  "io/ioutil"
+  "net/http"
+  "os"
+  "time"
 
-	"github.com/faiface/beep"
-	"github.com/faiface/beep/mp3"
-	"github.com/faiface/beep/speaker"
+  "github.com/faiface/beep"
+  "github.com/faiface/beep/mp3"
+  "github.com/faiface/beep/speaker"
+  "github.com/akamensky/argparse"
 )
 
-// Логування
-
-type Log struct {
-	fileName string
-}
-
-func (loger *Log) writeLog(w *Weather) {
-	str := fmt.Sprintf("%s\t temp: %.2f\t humidity: %d\t pressure: %d\n",
-		time.Now(), w.Temp, w.Humidity, w.Pressure,
-	)
-
-	loger.write(str)
-}
-
-func (loger *Log) danger(w *Weather) {
-	str := fmt.Sprintf("\nТРИВОГА ТРИВОГА ТРИВОГА %s\t temp: %.2f\t humidity: %d\t pressure: %d\n",
-		time.Now(), w.Temp, w.Humidity, w.Pressure,
-	)
-
-	loger.write(str)
-}
-
-func (loger *Log) write(str string) {
-	file, err := os.OpenFile(loger.fileName, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		log.Println(err)
-	}
-	defer file.Close()
-
-	fmt.Printf("%s\n", str)
-	file.WriteString(str)
-}
-
-func createLoger(fileName string) *Log {
-	return &Log{
-		fileName: fileName,
-	}
-}
-
-// Основана логіка
-
+/**
+ * Constants variables
+ */
 const (
-	TOKEN   = "56d1ac917f05a465682b89a2ddd05b0a"
-	API_URL = "http://api.openweathermap.org/data/2.5/weather?q=city&appid="
+  TOKEN   = "29c1d91366a8dec4292e5f57d0173b5ef8953b3e33e9f82ed3b5ff84c1c5bff8"
+  API_URL = "https://min-api.cryptocompare.com/data/price?fsym=%s&tsyms=%s&api_key=%s"
+  SELL_WHEN = 270
 )
 
-type BodyResponse struct {
-	Main Weather `json:"main"`
+/**
+ * Coin data struct
+ */
+type CoinData struct {
+  Usd float64 `json:"USD"`
+  Uah float64 `json:"UAH"`
+  Eur float64 `json:"EUR"`
+  danger   *chan bool
 }
 
-type MainResponse struct {
-	Temp string `json:"temp"`
+/**
+ * Create empty CoinData object
+ */
+func createCoinData(danger *chan bool) *CoinData {
+  return &CoinData{
+    Usd: 0,
+    Uah: 0,
+    Eur: 0,
+    danger:   danger,
+  }
 }
 
-type Weather struct {
-	Temp     float64 `json:"temp"`
-	Pressure int     `json:"pressure"`
-	Humidity int     `json:"humidity"`
-	init     bool
-	danger   *chan bool
+/**
+ * Check on signal or not
+ */
+func (c *CoinData) check(remoteData *CoinData) bool {
+  return remoteData.Usd >= SELL_WHEN
 }
 
-func createWether(danger *chan bool) *Weather {
-	return &Weather{
-		Temp:     0,
-		Pressure: 0,
-		Humidity: 0,
-		init:     false,
-		danger:   danger,
-	}
+/**
+ * Update coinData parameters
+ */
+func (c *CoinData) saveNewParams(remoteData *CoinData) {
+  c.Usd = remoteData.Usd
+  c.Uah = remoteData.Uah
+  c.Eur = remoteData.Eur
 }
 
-func (w *Weather) check(remoteData *Weather) bool {
-	if w.Temp != remoteData.Temp-273.15 {
-		return false
-	}
+/**
+ * Parse http response and update data
+ */
+func (c *CoinData) request(client http.Client, url string) {
+  resp, err := client.Get(url)
+  if err != nil {
+    errorLog(err)
+    return
+  }
+  defer resp.Body.Close()
 
-	if w.Pressure != remoteData.Pressure {
-		return false
-	}
+  body, err := ioutil.ReadAll(resp.Body)
+  if err != nil {
+    errorLog(err)
+    return
+  }
 
-	if w.Humidity != remoteData.Humidity {
-		return false
-	}
+  var buffer CoinData
 
-	return true
+  json.Unmarshal(body, &buffer)
+
+  if c.check(&buffer) {
+    *c.danger <- true
+    c.saveNewParams(&buffer)
+    return
+  }
+
+  c.saveNewParams(&buffer)
 }
 
-func (w *Weather) getWeather() *Weather {
-	return w
-}
-
-func (w *Weather) saveNewParams(remoteData *Weather) {
-	w.Temp = remoteData.Temp - 273.15
-	w.Humidity = remoteData.Humidity
-	w.Pressure = remoteData.Pressure
-	w.init = true
-}
-
-func (w *Weather) changeWeather(resp *http.Response) {
-	var buffer BodyResponse
-
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		log.Println(err)
-	}
-
-	json.Unmarshal(body, &buffer)
-
-	if w.init == true {
-		if w.check(&buffer.Main) {
-			return
-		}
-		*w.danger <- true
-		w.saveNewParams(&buffer.Main)
-		return
-	}
-	w.saveNewParams(&buffer.Main)
-}
-
+/**
+ * Play alarm sound
+ */
 func playSound() error {
-	f, err := os.Open("./sounds/alarm.mp3")
-	if err != nil {
-		log.Fatal(err)
-		return err
-	}
+  f, err := os.Open("./sounds/alarm.mp3")
+  if err != nil {
+    errorLog(err)
+    return err
+  }
 
-	streamer, format, err := mp3.Decode(f)
-	if err != nil {
-		log.Fatal(err)
-		return err
-	}
-	defer streamer.Close()
+  streamer, format, err := mp3.Decode(f)
+  if err != nil {
+    errorLog(err)
+    return err
+  }
+  defer streamer.Close()
 
-	sr := format.SampleRate * 2
-	speaker.Init(sr, sr.N(time.Second/10))
+  sr := format.SampleRate * 2
+  speaker.Init(sr, sr.N(time.Second/10))
 
-	resampled := beep.Resample(4, format.SampleRate, sr, streamer)
+  resampled := beep.Resample(4, format.SampleRate, sr, streamer)
 
-	done := make(chan bool, 0)
-	speaker.Play(beep.Seq(resampled, beep.Callback(func() {
-		done <- true
-	})))
+  done := make(chan bool, 0)
+  speaker.Play(beep.Seq(resampled, beep.Callback(func() {
+    done <- true
+  })))
 
-	<-done
+  <-done
 
-	return nil
-}
-
-func getCity(stream *os.File) string {
-	fmt.Printf("Введи назву міста, яке хочеш охороняти xD:\t")
-
-	reader := bufio.NewReader(os.Stdin)
-	str, _ := reader.ReadString('\n')
-	str = strings.Replace(str, "\n", "", -1)
-
-	return str
+  return nil
 }
 
 func main() {
-	whiteLoger := createLoger("log.txt")
-	danger := make(chan bool, 0)
-	weather := createWether(&danger)
-	city := getCity(os.Stdin)
+  setupLogger()
 
-	url := strings.Replace(API_URL, "city", city, -1) + TOKEN
+  parser := argparse.NewParser("default", "Program to test default values")
+  coin := parser.String("c", "coin", &argparse.Options{Required: false, Help: "Coin to check", Default: "ETH"})
+  currency := parser.String("o", "currency", &argparse.Options{Required: false, Help: "Currency to output", Default: "USD,UAH,EUR"})
 
-	go func() {
-		client := http.Client{
-			Timeout: 5 * time.Second,
-		}
-
-		for {
-			resp, err := client.Get(url)
-			if err != nil {
-				log.Println(err, "\nСталася помилка з мережою")
-				os.Exit(0)
-			}
-			defer resp.Body.Close()
-
-			weather.changeWeather(resp)
-			whiteLoger.writeLog(weather)
-
-			time.Sleep(2 * time.Minute)
-		}
-	}()
-
-	go func() {
-		for {
-			<-*weather.danger
-			whiteLoger.danger(weather)
-			playSound()
-		}
-	}()
-
-	for {
+  // Parse input
+	err := parser.Parse(os.Args)
+	if err != nil {
+    errorLog(err)
+		os.Exit(1)
 	}
+
+  danger := make(chan bool, 0)
+  coinData := createCoinData(&danger)
+
+  url := fmt.Sprintf(API_URL, *coin, *currency, TOKEN)
+
+  go func() {
+    client := http.Client {
+      Timeout: 5 * time.Second,
+    }
+
+    for {
+      coinData.request(client, url)
+      infoLog(coinData)
+
+      time.Sleep(5 * time.Minute)
+    }
+  }()
+
+  go func() {
+    for {
+      <-*coinData.danger
+      dangerLog(coinData)
+      playSound()
+    }
+  }()
+
+  for {
+  }
 }
